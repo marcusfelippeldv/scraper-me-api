@@ -196,11 +196,33 @@ async function extrairLinhasDaTabela(page, keyword) {
           textos.push(texto?.trim() || '');
         }
         
-        const serialME = textos[1] || '';
+        // Debug: mostrar todas as colunas da primeira linha
+        if (i === 0) {
+          log(`   DEBUG - Colunas encontradas (${textos.length}): ${textos.map((t, idx) => `[${idx}]="${t.substring(0, 30)}"`).join(' | ')}`);
+        }
+        
+        // Estrutura da tabela: checkbox(0) | Serial ME(1) | Tipo(2) | Ver Itens(3) | Cliente(4) | Data Limite(5) | Local(6)
+        // Mas o Serial ME pode estar como link, então vamos pegar de outra forma
+        
+        // Tentar pegar o Serial ME do link
+        let serialME = '';
+        const linkSerial = await row.$('td a[href*="pendencies"]');
+        if (linkSerial) {
+          serialME = await linkSerial.textContent();
+          serialME = serialME?.trim() || '';
+        }
+        
+        // Se não achou pelo link, tenta pela posição
+        if (!serialME) {
+          serialME = textos[1] || '';
+        }
+        
         const tipoOportunidade = textos[2] || '';
         const cliente = textos[4] || '';
         const dataLimite = textos[5] || '';
         const localEntrega = textos[6] || '';
+        
+        log(`   [${i + 1}] Serial: ${serialME} | Cliente: ${cliente.substring(0, 30)}`)
         
         // Clicar no "Ver Itens"
         let linkVerItens = await row.$('a:has-text("Ver Itens")');
