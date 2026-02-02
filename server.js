@@ -404,12 +404,38 @@ async function buscarCotacoesNimbi(page, keyword, limite) {
   const cotacoes = [];
   
   log('📋 [NIMBI] Navegando para Cotações Públicas...');
-  await page.goto(CONFIG.nimbi.cotacoesUrl, { waitUntil: 'networkidle', timeout: CONFIG.timeout });
-  await page.waitForTimeout(10000);
+  
+  // Usar domcontentloaded em vez de networkidle (mais rápido)
+  try {
+    await page.goto(CONFIG.nimbi.cotacoesUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  } catch (navError) {
+    log(`   [NIMBI] ⚠️ Timeout na navegação, tentando continuar...`);
+  }
+  
+  // Aguardar página carregar
+  await page.waitForTimeout(15000);
   
   // Debug: URL atual
   const urlAtual = page.url();
   log(`   [NIMBI] URL atual: ${urlAtual}`);
+  
+  // Se não estiver na página certa, tentar pelo menu
+  if (!urlAtual.includes('Public') && !urlAtual.includes('RFX')) {
+    log(`   [NIMBI] Tentando acessar pelo menu...`);
+    
+    // Tentar clicar no menu "Cotações Públicas"
+    const menuCotacoes = await page.$('a:has-text("Cotações Públicas")') ||
+                         await page.$('a:has-text("Cotacoes Publicas")') ||
+                         await page.$('a:has-text("RFQ")') ||
+                         await page.$('[href*="Public"]') ||
+                         await page.$('[href*="RFX"]');
+    
+    if (menuCotacoes) {
+      await menuCotacoes.click();
+      log(`   [NIMBI] ✅ Clicou no menu`);
+      await page.waitForTimeout(10000);
+    }
+  }
   
   // Buscar por keyword
   log(`🔍 [NIMBI] Procurando campo de busca...`);
