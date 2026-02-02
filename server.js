@@ -1,5 +1,6 @@
 // server.js
-// API do Scraper Mercado Eletrônico para Railway
+// API Multi-Portal Scraper - Sensorvix
+// Mercado Eletrônico + Nimbi
 
 const express = require('express');
 const { chromium } = require('playwright');
@@ -11,13 +12,24 @@ const PORT = process.env.PORT || 3000;
 
 // Configurações
 const CONFIG = {
-  loginUrl: 'https://me.com.br/do/Login.mvc/LoginNew',
-  oportunidadesUrl: 'https://me.com.br/supplier/inbox/pendencies/3',
-  usuario: process.env.ME_USUARIO || '3791A8D5',
-  senha: process.env.ME_SENHA || 'Frai@Sensor1007',
+  // Mercado Eletrônico
+  me: {
+    loginUrl: 'https://me.com.br/do/Login.mvc/LoginNew',
+    oportunidadesUrl: 'https://me.com.br/supplier/inbox/pendencies/3',
+    usuario: process.env.ME_USUARIO || '3791A8D5',
+    senha: process.env.ME_SENHA || 'Frai@Sensor1007',
+  },
+  // Nimbi
+  nimbi: {
+    loginUrl: 'https://ss001.nimbi.com.br/login/',
+    cotacoesUrl: 'https://tn006.nimbi.com.br/redenimbi/MyRFXs_List_Participant_Public.aspx',
+    email: 'sensorvix@sensorvix.com',
+    senha: 'Sick@#$2670',
+  },
+  // Webhook
   webhookUrl: process.env.WEBHOOK_URL || 'https://pjjciitfhnhshxtxyixa.supabase.co/functions/v1/receive-webhook',
   scraperToken: process.env.SCRAPER_TOKEN || 'sensorvix-scraper-2026',
-  timeout: 60000
+  timeout: 120000
 };
 
 // Logger
@@ -31,10 +43,11 @@ function log(message, data = null) {
 app.get('/', (req, res) => {
   res.json({ 
     status: 'online', 
-    service: 'Scraper Mercado Eletrônico - Sensorvix',
+    service: 'Scraper Multi-Portal - Sensorvix',
     endpoints: {
       'GET /': 'Status da API',
-      'POST /buscar': 'Buscar oportunidades por keyword',
+      'POST /buscar': 'Buscar no Mercado Eletrônico',
+      'POST /nimbi/buscar': 'Buscar no Nimbi',
       'GET /health': 'Health check'
     }
   });
@@ -44,7 +57,8 @@ app.get('/health', (req, res) => {
   res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
-// Endpoint principal: buscar por keyword
+// ==================== MERCADO ELETRÔNICO ====================
+
 app.post('/buscar', async (req, res) => {
   const { keyword, salvarNoBanco = true } = req.body;
   
@@ -52,18 +66,19 @@ app.post('/buscar', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Keyword é obrigatória' });
   }
   
-  log(`🔍 Recebida requisição de busca: "${keyword}"`);
+  log(`🔍 [ME] Recebida requisição de busca: "${keyword}"`);
   
   try {
-    const oportunidades = await executarScraper(keyword);
+    const oportunidades = await executarScraperME(keyword);
     
     let webhookResult = null;
     if (salvarNoBanco && oportunidades.length > 0) {
-      webhookResult = await enviarParaWebhook(oportunidades);
+      webhookResult = await enviarParaWebhook(oportunidades, 'mercado_eletronico');
     }
     
     res.json({
       success: true,
+      source: 'mercado_eletronico',
       keyword: keyword,
       total: oportunidades.length,
       salvosNoBanco: webhookResult?.inserted || 0,
@@ -71,78 +86,55 @@ app.post('/buscar', async (req, res) => {
     });
     
   } catch (error) {
-    log(`❌ Erro: ${error.message}`);
+    log(`❌ [ME] Erro: ${error.message}`);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Executar o scraper
-async function executarScraper(keyword) {
-  log('🚀 Iniciando scraper...');
+async function executarScraperME(keyword) {
+  log('🚀 [ME] Iniciando scraper...');
   
   const browser = await chromium.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
   });
   
-  const context = await browser.newContext({
-    viewport: { width: 1920, height: 1080 }
-  });
-  
+  const context = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
   const page = await context.newPage();
   page.setDefaultTimeout(CONFIG.timeout);
   
   try {
-    // Login
-    await doLogin(page);
-    
-    // Buscar oportunidades
-    const oportunidades = await buscarOportunidades(page, keyword);
-    
-    log(`✅ Scraper finalizado: ${oportunidades.length} oportunidades`);
+    await doLoginME(page);
+    const oportunidades = await buscarOportunidadesME(page, keyword);
+    log(`✅ [ME] Scraper finalizado: ${oportunidades.length} oportunidades`);
     return oportunidades;
-    
   } finally {
     await browser.close();
   }
 }
 
-// Fazer login
-async function doLogin(page) {
-  log('🔐 Fazendo login...');
-  
-  await page.goto(CONFIG.loginUrl, { waitUntil: 'networkidle' });
+async function doLoginME(page) {
+  log('🔐 [ME] Fazendo login...');
+  await page.goto(CONFIG.me.loginUrl, { waitUntil: 'networkidle' });
   await page.waitForTimeout(2000);
   
-  // Preencher usuário
   const userInput = await page.$('input[placeholder="Insira seu login"], input[placeholder*="login"]');
-  if (userInput) {
-    await userInput.fill(CONFIG.usuario);
-  }
+  if (userInput) await userInput.fill(CONFIG.me.usuario);
   
-  // Preencher senha
   const passInput = await page.$('input[type="password"]');
-  if (passInput) {
-    await passInput.fill(CONFIG.senha);
-  }
+  if (passInput) await passInput.fill(CONFIG.me.senha);
   
-  // Clicar em Entrar
-  const btnEntrar = await page.$('button:has-text("Entrar")') || 
-                    await page.$('button[type="submit"]');
-  if (btnEntrar) {
-    await btnEntrar.click();
-  }
+  const btnEntrar = await page.$('button:has-text("Entrar")') || await page.$('button[type="submit"]');
+  if (btnEntrar) await btnEntrar.click();
   
   await page.waitForTimeout(10000);
-  log('✅ Login realizado');
+  log('✅ [ME] Login realizado');
 }
 
-// Buscar oportunidades
-async function buscarOportunidades(page, keyword) {
+async function buscarOportunidadesME(page, keyword) {
   const oportunidades = [];
-  
-  const urlBusca = `${CONFIG.oportunidadesUrl}?term=${encodeURIComponent(keyword)}`;
-  log(`   Acessando: ${urlBusca}`);
+  const urlBusca = `${CONFIG.me.oportunidadesUrl}?term=${encodeURIComponent(keyword)}`;
+  log(`   [ME] Acessando: ${urlBusca}`);
   
   await page.goto(urlBusca, { waitUntil: 'networkidle' });
   await page.waitForTimeout(5000);
@@ -151,101 +143,66 @@ async function buscarOportunidades(page, keyword) {
   let temMaisPaginas = true;
   
   while (temMaisPaginas) {
-    log(`   📄 Página ${paginaAtual}...`);
-    
-    const linhas = await extrairLinhasDaTabela(page, keyword);
+    log(`   [ME] 📄 Página ${paginaAtual}...`);
+    const linhas = await extrairLinhasTabelaME(page, keyword);
     oportunidades.push(...linhas);
+    log(`   [ME] Encontradas ${linhas.length} oportunidades`);
     
-    log(`   Encontradas ${linhas.length} oportunidades na página ${paginaAtual}`);
-    
-    temMaisPaginas = await irParaProximaPagina(page);
-    
+    temMaisPaginas = await irParaProximaPaginaME(page);
     if (temMaisPaginas) {
       paginaAtual++;
       await page.waitForTimeout(3000);
-      
-      if (paginaAtual > 50) {
-        log('   ⚠️ Limite de 50 páginas atingido');
-        break;
-      }
+      if (paginaAtual > 50) break;
     }
   }
   
   return oportunidades;
 }
 
-// Extrair linhas da tabela
-async function extrairLinhasDaTabela(page, keyword) {
+async function extrairLinhasTabelaME(page, keyword) {
   const oportunidades = [];
   
   try {
     await page.waitForTimeout(3000);
-    
     const rows = await page.$$('table tbody tr');
-    log(`   Linhas na tabela: ${rows.length}`);
+    log(`   [ME] Linhas na tabela: ${rows.length}`);
     
     for (let i = 0; i < rows.length; i++) {
       try {
         const row = rows[i];
-        
         const cells = await row.$$('td');
         const textos = [];
-        
         for (const cell of cells) {
           const texto = await cell.textContent();
           textos.push(texto?.trim() || '');
         }
         
-        // Debug: mostrar todas as colunas da primeira linha
-        if (i === 0) {
-          log(`   DEBUG - Colunas encontradas (${textos.length}): ${textos.map((t, idx) => `[${idx}]="${t.substring(0, 30)}"`).join(' | ')}`);
-        }
-        
-        // Estrutura da tabela: checkbox(0) | Serial ME(1) | Tipo(2) | Ver Itens(3) | Cliente(4) | Data Limite(5) | Local(6)
-        // Mas o Serial ME pode estar como link, então vamos pegar de outra forma
-        
-        // Tentar pegar o Serial ME do link
         let serialME = '';
         const linkSerial = await row.$('td a[href*="pendencies"]');
         if (linkSerial) {
           serialME = await linkSerial.textContent();
           serialME = serialME?.trim() || '';
         }
-        
-        // Se não achou pelo link, tenta pela posição
-        if (!serialME) {
-          serialME = textos[1] || '';
-        }
+        if (!serialME) serialME = textos[1] || '';
         
         const tipoOportunidade = textos[2] || '';
         const cliente = textos[4] || '';
         const dataLimite = textos[5] || '';
         const localEntrega = textos[6] || '';
         
-        log(`   [${i + 1}] Serial: ${serialME} | Cliente: ${cliente.substring(0, 30)}`)
-        
-        // Clicar no "Ver Itens"
+        let itensDetalhes = { cotacao_id: '', qtd_itens_total: 0, itens: [] };
         let linkVerItens = await row.$('a:has-text("Ver Itens")');
         if (!linkVerItens) linkVerItens = await row.$('button:has-text("Ver Itens")');
-        if (!linkVerItens) linkVerItens = await row.$('span:has-text("Ver Itens")');
         
-        let itensDetalhes = { cotacao_id: '', qtd_itens_total: 0, itens: [] };
         if (linkVerItens) {
           await linkVerItens.click();
           await page.waitForTimeout(2000);
+          itensDetalhes = await extrairItensPopupME(page);
           
-          itensDetalhes = await extrairItensDoPopup(page);
-          
-          // Fechar popup
           let btnFechar = await page.$('button[aria-label="Close"]');
           if (!btnFechar) btnFechar = await page.$('button[aria-label="close"]');
-          if (!btnFechar) btnFechar = await page.$('svg[data-testid="CloseIcon"]');
-          
-          if (btnFechar) {
-            await btnFechar.click();
-          } else {
-            await page.keyboard.press('Escape');
-          }
+          if (btnFechar) await btnFechar.click();
+          else await page.keyboard.press('Escape');
           await page.waitForTimeout(1000);
         }
         
@@ -259,125 +216,477 @@ async function extrairLinhasDaTabela(page, keyword) {
           qtd_itens_total: itensDetalhes.qtd_itens_total,
           itens: itensDetalhes.itens,
           keyword_busca: keyword,
-          origem: 'oportunidade_negocio',
-          url: `https://me.com.br/supplier/inbox/pendencies/3?term=${keyword}`
+          origem: 'mercado_eletronico'
         };
         
         if (serialME && serialME.match(/^\d+$/)) {
           oportunidades.push(oportunidade);
         }
-        
       } catch (rowError) {
-        log(`   ⚠️ Erro na linha ${i + 1}: ${rowError.message}`);
+        log(`   [ME] ⚠️ Erro na linha ${i + 1}: ${rowError.message}`);
       }
     }
-    
   } catch (error) {
-    log(`   Erro ao extrair tabela: ${error.message}`);
+    log(`   [ME] Erro ao extrair tabela: ${error.message}`);
   }
   
   return oportunidades;
 }
 
-// Extrair itens do popup
-async function extrairItensDoPopup(page) {
-  const resultado = {
-    cotacao_id: '',
-    qtd_itens_total: 0,
-    itens: []
-  };
+async function extrairItensPopupME(page) {
+  const resultado = { cotacao_id: '', qtd_itens_total: 0, itens: [] };
   
   try {
     await page.waitForSelector('text=Lista de Itens', { timeout: 5000 });
     await page.waitForTimeout(1500);
     
-    // Capturar título do popup: "Lista de Itens (2 itens) - Cotação #21710289"
     const tituloPopup = await page.$('text=/Lista de Itens.*Cotação/');
     if (tituloPopup) {
       const textoTitulo = await tituloPopup.textContent();
-      
       const matchCotacao = textoTitulo.match(/#(\d+)/);
-      if (matchCotacao) {
-        resultado.cotacao_id = matchCotacao[1];
-      }
-      
+      if (matchCotacao) resultado.cotacao_id = matchCotacao[1];
       const matchQtd = textoTitulo.match(/\((\d+)\s*ite/i);
-      if (matchQtd) {
-        resultado.qtd_itens_total = parseInt(matchQtd[1]);
-      }
-      
-      log(`   📋 Cotação #${resultado.cotacao_id} (${resultado.qtd_itens_total} itens)`);
+      if (matchQtd) resultado.qtd_itens_total = parseInt(matchQtd[1]);
     }
     
     let linhasPopup = await page.$$('[role="dialog"] table tbody tr');
-    if (linhasPopup.length === 0) {
-      linhasPopup = await page.$$('[class*="MuiDialog"] table tbody tr');
-    }
-    if (linhasPopup.length === 0) {
-      linhasPopup = await page.$$('[class*="modal"] table tbody tr');
-    }
+    if (linhasPopup.length === 0) linhasPopup = await page.$$('[class*="MuiDialog"] table tbody tr');
     
     for (const linha of linhasPopup) {
       const cells = await linha.$$('td');
-      
       if (cells.length >= 3) {
         const valores = [];
         for (const cell of cells) {
           const val = await cell.textContent();
           valores.push(val?.trim() || '');
         }
-        
         const item = {
           numero: valores[0] || '',
           descricao: valores[1] || '',
           unidade: valores[2] || '',
           quantidade: valores[3] || ''
         };
-        
-        if (item.descricao && item.descricao.length > 0 && item.descricao !== 'Descrição') {
+        if (item.descricao && item.descricao !== 'Descrição') {
           resultado.itens.push(item);
         }
       }
     }
-    
   } catch (error) {
-    log(`   Erro ao extrair popup: ${error.message}`);
+    log(`   [ME] Erro ao extrair popup: ${error.message}`);
   }
   
   return resultado;
 }
 
-// Navegar para próxima página
-async function irParaProximaPagina(page) {
+async function irParaProximaPaginaME(page) {
   try {
     const btnProximo = await page.$('button[aria-label="Next"], button:has-text(">"), [class*="next"]:not([disabled])');
-    
     if (btnProximo) {
       const disabled = await btnProximo.getAttribute('disabled');
-      const ariaDisabled = await btnProximo.getAttribute('aria-disabled');
-      
-      if (disabled === null && ariaDisabled !== 'true') {
+      if (disabled === null) {
         await btnProximo.click();
         return true;
       }
     }
-    
     return false;
-    
   } catch (error) {
     return false;
   }
 }
 
-// Enviar para webhook
-async function enviarParaWebhook(oportunidades) {
-  log(`📤 Enviando ${oportunidades.length} oportunidades para o webhook...`);
+// ==================== NIMBI ====================
+
+app.post('/nimbi/buscar', async (req, res) => {
+  const { keyword = 'sensor', salvarNoBanco = true, limite = 50 } = req.body;
+  
+  log(`🔍 [NIMBI] Recebida requisição de busca: "${keyword}"`);
+  
+  try {
+    const cotacoes = await executarScraperNimbi(keyword, limite);
+    
+    let webhookResult = null;
+    if (salvarNoBanco && cotacoes.length > 0) {
+      webhookResult = await enviarParaWebhook(cotacoes, 'nimbi');
+    }
+    
+    res.json({
+      success: true,
+      source: 'nimbi',
+      keyword: keyword,
+      total: cotacoes.length,
+      salvosNoBanco: webhookResult?.inserted || 0,
+      cotacoes: cotacoes
+    });
+    
+  } catch (error) {
+    log(`❌ [NIMBI] Erro: ${error.message}`);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+async function executarScraperNimbi(keyword, limite) {
+  log('🚀 [NIMBI] Iniciando scraper...');
+  
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+  });
+  
+  const context = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
+  const page = await context.newPage();
+  page.setDefaultTimeout(CONFIG.timeout);
+  
+  try {
+    await doLoginNimbi(page);
+    const cotacoes = await buscarCotacoesNimbi(page, keyword, limite);
+    log(`✅ [NIMBI] Scraper finalizado: ${cotacoes.length} cotações`);
+    return cotacoes;
+  } finally {
+    await browser.close();
+  }
+}
+
+async function doLoginNimbi(page) {
+  log('🔐 [NIMBI] Fazendo login (etapa 1 - email)...');
+  await page.goto(CONFIG.nimbi.loginUrl, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(2000);
+  
+  // Etapa 1: Email
+  const emailInput = await page.$('input[type="email"]') || 
+                     await page.$('input[name="email"]') ||
+                     await page.$('input[type="text"]');
+  if (emailInput) {
+    await emailInput.fill(CONFIG.nimbi.email);
+    log('   [NIMBI] ✅ Email preenchido');
+  }
+  
+  const btnContinuar = await page.$('button[type="submit"]') || 
+                       await page.$('button:has-text("Continuar")') ||
+                       await page.$('button:has-text("Entrar")');
+  if (btnContinuar) await btnContinuar.click();
+  else await page.keyboard.press('Enter');
+  
+  log('   [NIMBI] ⏳ Aguardando tela de senha...');
+  await page.waitForTimeout(5000);
+  
+  // Etapa 2: Senha
+  log('🔐 [NIMBI] Fazendo login (etapa 2 - senha)...');
+  const passInput = await page.$('input[type="password"]');
+  if (passInput) {
+    await passInput.fill(CONFIG.nimbi.senha);
+    log('   [NIMBI] ✅ Senha preenchida');
+  }
+  
+  const btnEntrar = await page.$('button[type="submit"]') || 
+                    await page.$('button:has-text("Entrar")');
+  if (btnEntrar) await btnEntrar.click();
+  else await page.keyboard.press('Enter');
+  
+  log('   [NIMBI] ⏳ Aguardando carregamento...');
+  await page.waitForTimeout(20000);
+  log('✅ [NIMBI] Login realizado');
+}
+
+async function buscarCotacoesNimbi(page, keyword, limite) {
+  const cotacoes = [];
+  
+  log('📋 [NIMBI] Navegando para Cotações Públicas...');
+  await page.goto(CONFIG.nimbi.cotacoesUrl, { waitUntil: 'networkidle', timeout: CONFIG.timeout });
+  await page.waitForTimeout(8000);
+  
+  // Buscar por keyword
+  log(`🔍 [NIMBI] Buscando por: "${keyword}"`);
+  const campoBusca = await page.$('input[placeholder*="Encontre"]') ||
+                     await page.$('input[type="search"]') ||
+                     await page.$('input[placeholder*="RFQ"]') ||
+                     await page.$('input[id*="search"]');
+  
+  if (campoBusca) {
+    await campoBusca.click();
+    await page.waitForTimeout(500);
+    await campoBusca.fill(keyword);
+    await page.waitForTimeout(1000);
+    await page.keyboard.press('Enter');
+    log('   [NIMBI] ✅ Busca realizada');
+    await page.waitForTimeout(15000);
+  }
+  
+  let paginaAtual = 1;
+  let continuar = true;
+  
+  while (continuar && cotacoes.length < limite) {
+    log(`📄 [NIMBI] Página ${paginaAtual}...`);
+    const cotacoesPagina = await extrairCotacoesPaginaNimbi(page, keyword, limite - cotacoes.length);
+    
+    for (const cotacao of cotacoesPagina) {
+      if (cotacoes.length >= limite) break;
+      cotacoes.push(cotacao);
+    }
+    
+    log(`   [NIMBI] Extraídas ${cotacoesPagina.length} cotações da página ${paginaAtual}`);
+    
+    if (cotacoes.length < limite) {
+      continuar = await irParaProximaPaginaNimbi(page);
+      if (continuar) {
+        paginaAtual++;
+        await page.waitForTimeout(3000);
+        if (paginaAtual > 20) break;
+      }
+    } else {
+      continuar = false;
+    }
+  }
+  
+  return cotacoes;
+}
+
+async function extrairCotacoesPaginaNimbi(page, keyword, limiteRestante) {
+  const cotacoes = [];
+  
+  try {
+    await page.waitForTimeout(3000);
+    
+    // Buscar todos os links
+    const allLinks = await page.$$eval('a', links => {
+      return links.map(a => ({
+        texto: (a.textContent || '').trim().substring(0, 80),
+        href: a.href || ''
+      })).filter(l => l.texto.length > 10);
+    });
+    
+    // Filtrar títulos de RFQ
+    const titulosRFQ = allLinks.filter(l => 
+      l.texto.includes(' - ') || 
+      l.texto.includes('SENSOR') ||
+      l.texto.includes('RFQ') ||
+      l.texto.includes('RFX') ||
+      l.texto.includes('Entrega')
+    );
+    
+    log(`   [NIMBI] Títulos de RFQ encontrados: ${titulosRFQ.length}`);
+    
+    // Extrair RFQ IDs da página
+    const rfqIds = await page.$$eval('*', elements => {
+      const ids = [];
+      for (const el of elements) {
+        const texto = el.textContent || '';
+        const match = texto.match(/RFQ\s*-?\s*(\d{5,})/gi);
+        if (match) {
+          match.forEach(m => {
+            const id = m.match(/(\d{5,})/);
+            if (id && !ids.includes(id[1])) ids.push(id[1]);
+          });
+        }
+      }
+      return ids.slice(0, 20);
+    });
+    
+    // Processar cada título
+    for (let i = 0; i < Math.min(titulosRFQ.length, limiteRestante, 12); i++) {
+      try {
+        const tituloInfo = titulosRFQ[i];
+        
+        // Extrair RFQ ID
+        let rfqId = '';
+        const idMatch = tituloInfo.texto.match(/(\d{5,})/);
+        if (idMatch) rfqId = idMatch[1];
+        else if (rfqIds[i]) rfqId = rfqIds[i];
+        
+        log(`   [NIMBI] [${i + 1}] RFQ: ${rfqId} | ${tituloInfo.texto.substring(0, 45)}...`);
+        
+        // Clicar no link
+        const link = await page.$(`a:has-text("${tituloInfo.texto.substring(0, 30)}")`);
+        if (!link) {
+          log(`   [NIMBI] ⚠️ Link não encontrado`);
+          continue;
+        }
+        
+        await link.click();
+        await page.waitForTimeout(5000);
+        
+        // Extrair detalhes do popup
+        const detalhes = await extrairDetalhesPopupNimbi(page);
+        
+        // Montar objeto
+        const cotacao = {
+          rfq_id: rfqId || detalhes.rfq_id || '',
+          titulo: tituloInfo.texto,
+          empresa: detalhes.empresa || '',
+          cnpj: detalhes.cnpj || '',
+          endereco_entrega: detalhes.endereco_entrega || '',
+          endereco_faturamento: detalhes.endereco_faturamento || '',
+          itens: detalhes.itens || [],
+          anexos: detalhes.anexos || [],
+          categoria_detalhada: detalhes.categoria_detalhada || '',
+          qtd_registros: detalhes.qtd_registros || 0,
+          keyword_busca: keyword,
+          origem: 'nimbi',
+          data_extracao: new Date().toISOString()
+        };
+        
+        cotacoes.push(cotacao);
+        log(`   [NIMBI] ✅ Cotação ${rfqId} extraída`);
+        
+        // Fechar popup
+        await fecharPopupNimbi(page);
+        await page.waitForTimeout(2000);
+        
+      } catch (itemError) {
+        log(`   [NIMBI] ⚠️ Erro no item ${i + 1}: ${itemError.message}`);
+        await fecharPopupNimbi(page);
+        await page.waitForTimeout(1000);
+      }
+    }
+    
+  } catch (error) {
+    log(`   [NIMBI] Erro ao extrair cotações: ${error.message}`);
+  }
+  
+  return cotacoes;
+}
+
+async function extrairDetalhesPopupNimbi(page) {
+  const detalhes = {
+    rfq_id: '',
+    empresa: '',
+    anexos: [],
+    endereco_entrega: '',
+    endereco_faturamento: '',
+    cnpj: '',
+    itens: [],
+    categoria_detalhada: '',
+    qtd_registros: 0
+  };
+  
+  try {
+    await page.waitForTimeout(2000);
+    
+    const popupText = await page.evaluate(() => {
+      const modal = document.querySelector('[class*="modal"], [class*="dialog"], [class*="popup"], [role="dialog"], .modal');
+      if (modal) return modal.innerText || modal.textContent;
+      return document.body.innerText || document.body.textContent;
+    });
+    
+    // Extrair empresa
+    const linhas = popupText.split('\n').filter(l => l.trim().length > 0);
+    for (const linha of linhas) {
+      if ((linha.includes('LTDA') || linha.includes('S.A') || linha.includes('S/A') || 
+           linha.includes('HOLDING') || linha.includes('INDUSTRIA')) &&
+          !linha.includes('Empresa') && !linha.includes('PARTICIPAR')) {
+        detalhes.empresa = linha.trim();
+        break;
+      }
+    }
+    
+    // Extrair anexos
+    const anexosElements = await page.$$('a[href*=".doc"], a[href*=".xls"], a[href*=".pdf"], a[href*="download"]');
+    for (const anexoEl of anexosElements) {
+      const textoAnexo = await anexoEl.textContent();
+      if (textoAnexo && textoAnexo.trim().length > 0) {
+        detalhes.anexos.push(textoAnexo.trim());
+      }
+    }
+    
+    // Extrair endereço de entrega
+    const endEntregaMatch = popupText.match(/End\.?\s*Entrega\s*\n*([^\n]+(?:\n[^\n]+)*?)(?=Endereço|Itens|Volume|MRO|$)/i);
+    if (endEntregaMatch) {
+      detalhes.endereco_entrega = endEntregaMatch[1].replace(/\n/g, ' ').trim().substring(0, 300);
+    }
+    
+    // Extrair endereço de faturamento
+    const endFatMatch = popupText.match(/Faturamento\s*\n*([^\n]+(?:\n[^\n]+)*?)(?=Itens|Volume|MRO|$)/i);
+    if (endFatMatch) {
+      detalhes.endereco_faturamento = endFatMatch[1].replace(/\n/g, ' ').trim().substring(0, 300);
+    }
+    
+    // Extrair itens
+    const descricaoMatch = popupText.match(/Itens\s*\n*([A-Z][^\n]+)/i);
+    const volumeMatch = popupText.match(/Volume\s*\n*(\d+[,.]?\d*\s*\w+)/i);
+    if (descricaoMatch) {
+      detalhes.itens.push({
+        descricao: descricaoMatch[1].trim(),
+        volume: volumeMatch ? volumeMatch[1].trim() : ''
+      });
+    }
+    
+    // Extrair categoria detalhada
+    const catMatch = popupText.match(/([A-Z]{2,}:\s*[A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ\s,]+>\s*[A-ZÁÉÍÓÚÂÊÎÔÛÃÕÇ\s]+)/i);
+    if (catMatch) {
+      detalhes.categoria_detalhada = catMatch[1].trim();
+    }
+    
+    // Extrair quantidade de registros
+    const regMatch = popupText.match(/(\d+)\s*registros?/i);
+    if (regMatch) {
+      detalhes.qtd_registros = parseInt(regMatch[1]);
+    }
+    
+    // Extrair CNPJ
+    const cnpjMatch = popupText.match(/CNPJ[:\s]*([0-9]{2}[.\s]?[0-9]{3}[.\s]?[0-9]{3}[\/\s]?[0-9]{4}[-\s]?[0-9]{2})/i);
+    if (cnpjMatch) {
+      detalhes.cnpj = cnpjMatch[1].trim();
+    }
+    
+    log(`   [NIMBI] 📋 Empresa: ${(detalhes.empresa || '').substring(0, 40)}... | Itens: ${detalhes.itens.length}`);
+    
+  } catch (error) {
+    log(`   [NIMBI] ⚠️ Erro ao extrair detalhes: ${error.message}`);
+  }
+  
+  return detalhes;
+}
+
+async function fecharPopupNimbi(page) {
+  try {
+    const btnFechar = await page.$('button:has-text("FECHAR")') ||
+                      await page.$('button:has-text("Fechar")') ||
+                      await page.$('a:has-text("FECHAR")') ||
+                      await page.$('[class*="close"]') ||
+                      await page.$('button[aria-label*="close"]');
+    
+    if (btnFechar) {
+      await btnFechar.click();
+    } else {
+      await page.keyboard.press('Escape');
+    }
+    await page.waitForTimeout(1000);
+  } catch (error) {
+    await page.keyboard.press('Escape');
+  }
+}
+
+async function irParaProximaPaginaNimbi(page) {
+  try {
+    const btnProximo = await page.$('a:has-text("próximo")') ||
+                       await page.$('a:has-text("Próximo")') ||
+                       await page.$('[class*="next"]') ||
+                       await page.$('a:has-text(">")');
+    
+    if (btnProximo) {
+      const disabled = await btnProximo.getAttribute('disabled');
+      const classList = await btnProximo.getAttribute('class') || '';
+      if (disabled === null && !classList.includes('disabled')) {
+        await btnProximo.click();
+        log('   [NIMBI] ➡️ Próxima página...');
+        return true;
+      }
+    }
+    return false;
+  } catch (error) {
+    return false;
+  }
+}
+
+// ==================== WEBHOOK ====================
+
+async function enviarParaWebhook(dados, source) {
+  log(`📤 Enviando ${dados.length} registros para webhook (${source})...`);
   
   const payload = {
-    source: 'mercado_eletronico',
+    source: source,
     timestamp: new Date().toISOString(),
-    total: oportunidades.length,
-    oportunidades: oportunidades
+    total: dados.length,
+    oportunidades: dados
   };
   
   try {
@@ -390,14 +699,11 @@ async function enviarParaWebhook(oportunidades) {
       body: JSON.stringify(payload)
     });
     
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     
     const result = await response.json();
     log('✅ Webhook respondeu:', result);
     return result;
-    
   } catch (error) {
     log('❌ Erro ao enviar para webhook:', error.message);
     return null;
@@ -406,5 +712,5 @@ async function enviarParaWebhook(oportunidades) {
 
 // Iniciar servidor
 app.listen(PORT, () => {
-  log(`🚀 API Scraper rodando na porta ${PORT}`);
+  log(`🚀 API Scraper Multi-Portal rodando na porta ${PORT}`);
 });
