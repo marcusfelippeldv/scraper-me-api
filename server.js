@@ -361,8 +361,8 @@ async function executarScraperNimbi(keyword, limite) {
 
 async function doLoginNimbi(page) {
   log('🔐 [NIMBI] Fazendo login (etapa 1 - email)...');
-  await page.goto(CONFIG.nimbi.loginUrl, { waitUntil: 'networkidle' });
-  await page.waitForTimeout(2000);
+  await page.goto(CONFIG.nimbi.loginUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForTimeout(3000);
   
   // Etapa 1: Email
   const emailInput = await page.$('input[type="email"]') || 
@@ -396,46 +396,67 @@ async function doLoginNimbi(page) {
   else await page.keyboard.press('Enter');
   
   log('   [NIMBI] ⏳ Aguardando carregamento...');
-  await page.waitForTimeout(20000);
+  await page.waitForTimeout(15000);
+  
+  // Após login, clicar no menu Cotações Públicas
+  log('   [NIMBI] Procurando menu Cotações Públicas...');
+  
+  // Tentar clicar no menu lateral ou link direto
+  let menuCotacoes = await page.$('a:has-text("Cotações Públicas")');
+  if (!menuCotacoes) menuCotacoes = await page.$('a:has-text("Cotacoes Publicas")');
+  if (!menuCotacoes) menuCotacoes = await page.$('a[href*="Public"]');
+  if (!menuCotacoes) menuCotacoes = await page.$('a[href*="public"]');
+  if (!menuCotacoes) menuCotacoes = await page.$('text=Cotações Públicas');
+  if (!menuCotacoes) menuCotacoes = await page.$('span:has-text("Cotações Públicas")');
+  
+  if (menuCotacoes) {
+    try {
+      // Usar force:true para clicar mesmo se não visível
+      await menuCotacoes.click({ force: true, timeout: 10000 });
+      log('   [NIMBI] ✅ Clicou em Cotações Públicas');
+      await page.waitForTimeout(15000);
+    } catch (menuError) {
+      log(`   [NIMBI] ⚠️ Erro ao clicar no menu: ${menuError.message}`);
+      // Tentar via JavaScript
+      try {
+        await page.evaluate(() => {
+          const link = document.querySelector('a[href*="Public"]') || 
+                       document.querySelector('a[href*="public"]') ||
+                       Array.from(document.querySelectorAll('a')).find(a => a.textContent.includes('Cotações'));
+          if (link) link.click();
+        });
+        log('   [NIMBI] ✅ Clicou via JavaScript');
+        await page.waitForTimeout(15000);
+      } catch (jsError) {
+        log(`   [NIMBI] ⚠️ Erro ao clicar via JS: ${jsError.message}`);
+      }
+    }
+  } else {
+    log('   [NIMBI] ⚠️ Menu não encontrado, tentando navegar direto...');
+  }
+  
   log('✅ [NIMBI] Login realizado');
 }
 
 async function buscarCotacoesNimbi(page, keyword, limite) {
   const cotacoes = [];
   
-  log('📋 [NIMBI] Navegando para Cotações Públicas...');
-  
-  // Usar domcontentloaded em vez de networkidle (mais rápido)
-  try {
-    await page.goto(CONFIG.nimbi.cotacoesUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  } catch (navError) {
-    log(`   [NIMBI] ⚠️ Timeout na navegação, tentando continuar...`);
-  }
-  
-  // Aguardar página carregar
-  await page.waitForTimeout(15000);
-  
-  // Debug: URL atual
+  // Debug: URL atual (já deve estar em Cotações Públicas após login)
   const urlAtual = page.url();
-  log(`   [NIMBI] URL atual: ${urlAtual}`);
+  log(`📋 [NIMBI] URL atual: ${urlAtual}`);
   
-  // Se não estiver na página certa, tentar pelo menu
-  if (!urlAtual.includes('Public') && !urlAtual.includes('RFX')) {
-    log(`   [NIMBI] Tentando acessar pelo menu...`);
-    
-    // Tentar clicar no menu "Cotações Públicas"
-    const menuCotacoes = await page.$('a:has-text("Cotações Públicas")') ||
-                         await page.$('a:has-text("Cotacoes Publicas")') ||
-                         await page.$('a:has-text("RFQ")') ||
-                         await page.$('[href*="Public"]') ||
-                         await page.$('[href*="RFX"]');
-    
-    if (menuCotacoes) {
-      await menuCotacoes.click();
-      log(`   [NIMBI] ✅ Clicou no menu`);
+  // Se não estiver na página de cotações, tentar navegar
+  if (!urlAtual.includes('Public') && !urlAtual.includes('RFX') && !urlAtual.includes('publicrfq')) {
+    log('   [NIMBI] Navegando para Cotações Públicas...');
+    try {
+      await page.goto(CONFIG.nimbi.cotacoesUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
       await page.waitForTimeout(10000);
+    } catch (navError) {
+      log(`   [NIMBI] ⚠️ Erro na navegação direta, continuando na página atual`);
     }
   }
+  
+  await page.waitForTimeout(5000);
   
   // Buscar por keyword
   log(`🔍 [NIMBI] Procurando campo de busca...`);
@@ -447,28 +468,50 @@ async function buscarCotacoesNimbi(page, keyword, limite) {
   if (!campoBusca) campoBusca = await page.$('input[id*="search"]');
   if (!campoBusca) campoBusca = await page.$('input[id*="Search"]');
   if (!campoBusca) campoBusca = await page.$('input[class*="search"]');
-  if (!campoBusca) campoBusca = await page.$('input[name*="search"]');
   if (!campoBusca) campoBusca = await page.$('input[placeholder*="Buscar"]');
   if (!campoBusca) campoBusca = await page.$('input[placeholder*="Pesquisar"]');
-  if (!campoBusca) {
-    // Tentar pegar qualquer input de texto visível
-    const inputs = await page.$$('input[type="text"]');
-    log(`   [NIMBI] Inputs de texto encontrados: ${inputs.length}`);
-    if (inputs.length > 0) campoBusca = inputs[0];
+  
+  // Debug: listar inputs
+  const inputs = await page.$$('input[type="text"]');
+  log(`   [NIMBI] Inputs de texto na página: ${inputs.length}`);
+  
+  if (!campoBusca && inputs.length > 0) {
+    campoBusca = inputs[0];
   }
   
   if (campoBusca) {
     log(`   [NIMBI] ✅ Campo de busca encontrado`);
-    await campoBusca.click();
-    await page.waitForTimeout(500);
-    await campoBusca.fill(keyword);
-    log(`   [NIMBI] ✅ Keyword "${keyword}" digitada`);
-    await page.waitForTimeout(1000);
-    await page.keyboard.press('Enter');
-    log('   [NIMBI] ✅ Enter pressionado, aguardando resultados...');
-    await page.waitForTimeout(15000);
+    try {
+      await campoBusca.click({ force: true, timeout: 5000 });
+      await page.waitForTimeout(500);
+      await campoBusca.fill(keyword);
+      log(`   [NIMBI] ✅ Keyword "${keyword}" digitada`);
+      await page.waitForTimeout(1000);
+      await page.keyboard.press('Enter');
+      log('   [NIMBI] ✅ Enter pressionado');
+      await page.waitForTimeout(15000);
+    } catch (buscaError) {
+      log(`   [NIMBI] ⚠️ Erro na busca via Playwright: ${buscaError.message}`);
+      // Tentar via JavaScript
+      try {
+        await page.evaluate((kw) => {
+          const input = document.querySelector('input[type="text"]') || 
+                        document.querySelector('input[type="search"]') ||
+                        document.querySelector('input[placeholder*="Encontre"]');
+          if (input) {
+            input.value = kw;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+          }
+        }, keyword);
+        log('   [NIMBI] ✅ Busca via JavaScript');
+        await page.waitForTimeout(15000);
+      } catch (jsError) {
+        log(`   [NIMBI] ⚠️ Erro na busca via JS: ${jsError.message}`);
+      }
+    }
   } else {
-    log('   [NIMBI] ⚠️ Campo de busca NÃO encontrado - continuando sem filtro');
+    log('   [NIMBI] ⚠️ Campo de busca NÃO encontrado');
   }
   
   // Debug: listar todos os links da página
@@ -489,7 +532,7 @@ async function buscarCotacoesNimbi(page, keyword, limite) {
     
     log(`   [NIMBI] Extraídas ${cotacoesPagina.length} cotações da página ${paginaAtual}`);
     
-    if (cotacoes.length < limite) {
+    if (cotacoes.length < limite && cotacoesPagina.length > 0) {
       continuar = await irParaProximaPaginaNimbi(page);
       if (continuar) {
         paginaAtual++;
@@ -602,9 +645,9 @@ async function extrairCotacoesPaginaNimbi(page, keyword, limiteRestante) {
             log(`   [NIMBI] ⚠️ Link não encontrado`);
             continue;
           }
-          await linkByHref.click();
+          await linkByHref.click({ force: true });
         } else {
-          await link.click();
+          await link.click({ force: true });
         }
         
         await page.waitForTimeout(5000);
