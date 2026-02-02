@@ -362,7 +362,13 @@ async function executarScraperNimbi(keyword, limite) {
 async function doLoginNimbi(page) {
   log('🔐 [NIMBI] Fazendo login (etapa 1 - email)...');
   await page.goto(CONFIG.nimbi.loginUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(3000);
+  await page.waitForTimeout(5000);
+  
+  // Debug: verificar se tem captcha
+  const temCaptcha = await page.$('[class*="captcha"], [id*="captcha"], [class*="recaptcha"], iframe[src*="captcha"]');
+  if (temCaptcha) {
+    log('   [NIMBI] ⚠️ CAPTCHA DETECTADO!');
+  }
   
   // Etapa 1: Email
   const emailInput = await page.$('input[type="email"]') || 
@@ -371,37 +377,78 @@ async function doLoginNimbi(page) {
   if (emailInput) {
     await emailInput.fill(CONFIG.nimbi.email);
     log('   [NIMBI] ✅ Email preenchido');
+  } else {
+    log('   [NIMBI] ⚠️ Campo de email não encontrado!');
   }
   
   const btnContinuar = await page.$('button[type="submit"]') || 
                        await page.$('button:has-text("Continuar")') ||
                        await page.$('button:has-text("Entrar")');
-  if (btnContinuar) await btnContinuar.click();
-  else await page.keyboard.press('Enter');
+  if (btnContinuar) {
+    await btnContinuar.click();
+    log('   [NIMBI] ✅ Clicou em Continuar');
+  } else {
+    await page.keyboard.press('Enter');
+    log('   [NIMBI] ✅ Pressionou Enter');
+  }
   
-  log('   [NIMBI] ⏳ Aguardando tela de senha...');
-  await page.waitForTimeout(5000);
+  log('   [NIMBI] ⏳ Aguardando tela de senha (8s)...');
+  await page.waitForTimeout(8000);
   
-  // Etapa 2: Senha
+  // Debug: verificar URL atual
+  const urlAposEmail = page.url();
+  log(`   [NIMBI] URL após email: ${urlAposEmail}`);
+  
+  // Etapa 2: Senha - usar type() em vez de fill() para caracteres especiais
   log('🔐 [NIMBI] Fazendo login (etapa 2 - senha)...');
   const passInput = await page.$('input[type="password"]');
   if (passInput) {
-    await passInput.fill(CONFIG.nimbi.senha);
-    log('   [NIMBI] ✅ Senha preenchida');
+    await passInput.click();
+    await passInput.type(CONFIG.nimbi.senha, { delay: 100 });
+    log('   [NIMBI] ✅ Senha digitada');
+  } else {
+    log('   [NIMBI] ⚠️ Campo de senha não encontrado!');
   }
   
   const btnEntrar = await page.$('button[type="submit"]') || 
-                    await page.$('button:has-text("Entrar")');
-  if (btnEntrar) await btnEntrar.click();
-  else await page.keyboard.press('Enter');
+                    await page.$('button:has-text("Entrar")') ||
+                    await page.$('button:has-text("Login")');
+  if (btnEntrar) {
+    await btnEntrar.click();
+    log('   [NIMBI] ✅ Clicou em Entrar');
+  } else {
+    await page.keyboard.press('Enter');
+    log('   [NIMBI] ✅ Pressionou Enter');
+  }
   
-  log('   [NIMBI] ⏳ Aguardando carregamento...');
-  await page.waitForTimeout(15000);
+  log('   [NIMBI] ⏳ Aguardando carregamento (25s)...');
+  await page.waitForTimeout(25000);
+  
+  // Debug: verificar se login funcionou
+  const urlAposLogin = page.url();
+  log(`   [NIMBI] URL após login: ${urlAposLogin}`);
+  
+  // Verificar erro de login
+  const erroTexto = await page.evaluate(() => {
+    const erroEl = document.querySelector('[class*="error"], [class*="alert"], [class*="danger"]');
+    return erroEl ? erroEl.textContent : null;
+  });
+  if (erroTexto) {
+    log(`   [NIMBI] ⚠️ POSSÍVEL ERRO: ${erroTexto.substring(0, 100)}`);
+  }
+  
+  // Se ainda na página de login, login falhou
+  if (urlAposLogin.includes('login')) {
+    log('   [NIMBI] ⚠️ AINDA NA PÁGINA DE LOGIN - Verificando...');
+    
+    // Listar todos os links para debug
+    const links = await page.$$eval('a', els => els.map(a => a.textContent?.trim()).filter(t => t).slice(0, 10));
+    log(`   [NIMBI] Links na página: ${links.join(' | ')}`);
+  }
   
   // Após login, clicar no menu Cotações Públicas
   log('   [NIMBI] Procurando menu Cotações Públicas...');
   
-  // Tentar clicar no menu lateral ou link direto
   let menuCotacoes = await page.$('a:has-text("Cotações Públicas")');
   if (!menuCotacoes) menuCotacoes = await page.$('a:has-text("Cotacoes Publicas")');
   if (!menuCotacoes) menuCotacoes = await page.$('a[href*="Public"]');
@@ -411,31 +458,17 @@ async function doLoginNimbi(page) {
   
   if (menuCotacoes) {
     try {
-      // Usar force:true para clicar mesmo se não visível
       await menuCotacoes.click({ force: true, timeout: 10000 });
       log('   [NIMBI] ✅ Clicou em Cotações Públicas');
       await page.waitForTimeout(15000);
     } catch (menuError) {
       log(`   [NIMBI] ⚠️ Erro ao clicar no menu: ${menuError.message}`);
-      // Tentar via JavaScript
-      try {
-        await page.evaluate(() => {
-          const link = document.querySelector('a[href*="Public"]') || 
-                       document.querySelector('a[href*="public"]') ||
-                       Array.from(document.querySelectorAll('a')).find(a => a.textContent.includes('Cotações'));
-          if (link) link.click();
-        });
-        log('   [NIMBI] ✅ Clicou via JavaScript');
-        await page.waitForTimeout(15000);
-      } catch (jsError) {
-        log(`   [NIMBI] ⚠️ Erro ao clicar via JS: ${jsError.message}`);
-      }
     }
   } else {
-    log('   [NIMBI] ⚠️ Menu não encontrado, tentando navegar direto...');
+    log('   [NIMBI] ⚠️ Menu não encontrado');
   }
   
-  log('✅ [NIMBI] Login realizado');
+  log('✅ [NIMBI] Processo de login finalizado');
 }
 
 async function buscarCotacoesNimbi(page, keyword, limite) {
