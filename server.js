@@ -405,24 +405,49 @@ async function buscarCotacoesNimbi(page, keyword, limite) {
   
   log('📋 [NIMBI] Navegando para Cotações Públicas...');
   await page.goto(CONFIG.nimbi.cotacoesUrl, { waitUntil: 'networkidle', timeout: CONFIG.timeout });
-  await page.waitForTimeout(8000);
+  await page.waitForTimeout(10000);
+  
+  // Debug: URL atual
+  const urlAtual = page.url();
+  log(`   [NIMBI] URL atual: ${urlAtual}`);
   
   // Buscar por keyword
-  log(`🔍 [NIMBI] Buscando por: "${keyword}"`);
-  const campoBusca = await page.$('input[placeholder*="Encontre"]') ||
-                     await page.$('input[type="search"]') ||
-                     await page.$('input[placeholder*="RFQ"]') ||
-                     await page.$('input[id*="search"]');
+  log(`🔍 [NIMBI] Procurando campo de busca...`);
+  
+  // Tentar vários seletores para o campo de busca
+  let campoBusca = await page.$('input[placeholder*="Encontre"]');
+  if (!campoBusca) campoBusca = await page.$('input[placeholder*="RFQ"]');
+  if (!campoBusca) campoBusca = await page.$('input[type="search"]');
+  if (!campoBusca) campoBusca = await page.$('input[id*="search"]');
+  if (!campoBusca) campoBusca = await page.$('input[id*="Search"]');
+  if (!campoBusca) campoBusca = await page.$('input[class*="search"]');
+  if (!campoBusca) campoBusca = await page.$('input[name*="search"]');
+  if (!campoBusca) campoBusca = await page.$('input[placeholder*="Buscar"]');
+  if (!campoBusca) campoBusca = await page.$('input[placeholder*="Pesquisar"]');
+  if (!campoBusca) {
+    // Tentar pegar qualquer input de texto visível
+    const inputs = await page.$$('input[type="text"]');
+    log(`   [NIMBI] Inputs de texto encontrados: ${inputs.length}`);
+    if (inputs.length > 0) campoBusca = inputs[0];
+  }
   
   if (campoBusca) {
+    log(`   [NIMBI] ✅ Campo de busca encontrado`);
     await campoBusca.click();
     await page.waitForTimeout(500);
     await campoBusca.fill(keyword);
+    log(`   [NIMBI] ✅ Keyword "${keyword}" digitada`);
     await page.waitForTimeout(1000);
     await page.keyboard.press('Enter');
-    log('   [NIMBI] ✅ Busca realizada');
+    log('   [NIMBI] ✅ Enter pressionado, aguardando resultados...');
     await page.waitForTimeout(15000);
+  } else {
+    log('   [NIMBI] ⚠️ Campo de busca NÃO encontrado - continuando sem filtro');
   }
+  
+  // Debug: listar todos os links da página
+  const todosLinks = await page.$$eval('a', links => links.length);
+  log(`   [NIMBI] Total de links na página: ${todosLinks}`);
   
   let paginaAtual = 1;
   let continuar = true;
@@ -459,24 +484,57 @@ async function extrairCotacoesPaginaNimbi(page, keyword, limiteRestante) {
   try {
     await page.waitForTimeout(3000);
     
+    // Debug: pegar texto da página
+    const textoBody = await page.textContent('body');
+    log(`   [NIMBI] Tamanho do texto da página: ${textoBody.length} chars`);
+    
+    // Verificar se tem "sensor" ou a keyword no texto
+    const temKeyword = textoBody.toLowerCase().includes(keyword.toLowerCase());
+    log(`   [NIMBI] Página contém "${keyword}": ${temKeyword}`);
+    
     // Buscar todos os links
     const allLinks = await page.$$eval('a', links => {
       return links.map(a => ({
         texto: (a.textContent || '').trim().substring(0, 80),
         href: a.href || ''
-      })).filter(l => l.texto.length > 10);
+      })).filter(l => l.texto.length > 5);
     });
     
-    // Filtrar títulos de RFQ
-    const titulosRFQ = allLinks.filter(l => 
-      l.texto.includes(' - ') || 
-      l.texto.includes('SENSOR') ||
-      l.texto.includes('RFQ') ||
-      l.texto.includes('RFX') ||
-      l.texto.includes('Entrega')
-    );
+    log(`   [NIMBI] Total de links com texto: ${allLinks.length}`);
+    
+    // Mostrar primeiros 5 links para debug
+    if (allLinks.length > 0) {
+      log(`   [NIMBI] Primeiros links: ${allLinks.slice(0, 5).map(l => l.texto.substring(0, 40)).join(' | ')}`);
+    }
+    
+    // Filtrar títulos de RFQ - mais flexível
+    const titulosRFQ = allLinks.filter(l => {
+      const texto = l.texto.toUpperCase();
+      return texto.includes(' - ') || 
+             texto.includes('SENSOR') ||
+             texto.includes('RFQ') ||
+             texto.includes('RFX') ||
+             texto.includes('ENTREGA') ||
+             texto.includes('COTAÇÃO') ||
+             texto.includes('COTACAO') ||
+             (texto.length > 20 && l.href.includes('RFX'));
+    });
     
     log(`   [NIMBI] Títulos de RFQ encontrados: ${titulosRFQ.length}`);
+    
+    // Se não encontrou com filtro, tentar pegar links que parecem ser cotações
+    let titulosParaProcessar = titulosRFQ;
+    if (titulosRFQ.length === 0) {
+      log(`   [NIMBI] Tentando filtro alternativo...`);
+      // Pegar links que têm href com RFX ou aspx
+      titulosParaProcessar = allLinks.filter(l => 
+        l.href.includes('RFX') || 
+        l.href.includes('Rfx') ||
+        l.href.includes('rfx') ||
+        (l.href.includes('.aspx') && l.texto.length > 15)
+      );
+      log(`   [NIMBI] Títulos alternativos: ${titulosParaProcessar.length}`);
+    }
     
     // Extrair RFQ IDs da página
     const rfqIds = await page.$$eval('*', elements => {
@@ -494,10 +552,12 @@ async function extrairCotacoesPaginaNimbi(page, keyword, limiteRestante) {
       return ids.slice(0, 20);
     });
     
+    log(`   [NIMBI] RFQ IDs na página: ${rfqIds.length}`);
+    
     // Processar cada título
-    for (let i = 0; i < Math.min(titulosRFQ.length, limiteRestante, 12); i++) {
+    for (let i = 0; i < Math.min(titulosParaProcessar.length, limiteRestante, 12); i++) {
       try {
-        const tituloInfo = titulosRFQ[i];
+        const tituloInfo = titulosParaProcessar[i];
         
         // Extrair RFQ ID
         let rfqId = '';
@@ -508,13 +568,19 @@ async function extrairCotacoesPaginaNimbi(page, keyword, limiteRestante) {
         log(`   [NIMBI] [${i + 1}] RFQ: ${rfqId} | ${tituloInfo.texto.substring(0, 45)}...`);
         
         // Clicar no link
-        const link = await page.$(`a:has-text("${tituloInfo.texto.substring(0, 30)}")`);
+        const link = await page.$(`a:has-text("${tituloInfo.texto.substring(0, 25)}")`);
         if (!link) {
-          log(`   [NIMBI] ⚠️ Link não encontrado`);
-          continue;
+          log(`   [NIMBI] ⚠️ Link não encontrado, tentando por href...`);
+          const linkByHref = await page.$(`a[href="${tituloInfo.href}"]`);
+          if (!linkByHref) {
+            log(`   [NIMBI] ⚠️ Link não encontrado`);
+            continue;
+          }
+          await linkByHref.click();
+        } else {
+          await link.click();
         }
         
-        await link.click();
         await page.waitForTimeout(5000);
         
         // Extrair detalhes do popup
